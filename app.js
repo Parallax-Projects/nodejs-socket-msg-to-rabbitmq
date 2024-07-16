@@ -1,11 +1,10 @@
 const net = require('net');
-const amqp = require('amqplib');
 const mysql = require('mysql2/promise');
 
 const port = 4000; // TCP server port
-const rabbitMQUrl = 'amqp://admin:bthXwgxDoXf85xd@rabbitmq.parallaxtec.dev'; // URL to your RabbitMQ server with authentication
-const queue = 'locationQueue'; // Name of the RabbitMQ queue
 
+let deviceIdMap = new Map();
+// Database configuration
 const dbConfig = {
     host: '68.183.225.237',
     user: 'prabath',
@@ -13,10 +12,7 @@ const dbConfig = {
     database: 'gto6'
 };
 
-let channel;
-let connection;
 let db;
-let deviceIdMap = new Map(); // Map to store device ID based on socket connection
 
 // Connect to MySQL
 async function connectMySQL() {
@@ -30,149 +26,158 @@ async function connectMySQL() {
     }
 }
 
-// Connect to RabbitMQ
-async function connectRabbitMQ() {
-    try {
-        console.log('Connecting to RabbitMQ');
-        connection = await amqp.connect(rabbitMQUrl);
-        console.log('Connection established');
+// CRC16 Lookup Table
+const crctab16 = [
+    0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
+    0x8c48, 0x9dc1, 0xaf5a, 0xbed3, 0xca6c, 0xdbe5, 0xe97e, 0xf8f7,
+    0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
+    0x9cc9, 0x8d40, 0xbfdb, 0xae52, 0xdaed, 0xcb64, 0xf9ff, 0xe876,
+    0x2102, 0x308b, 0x0210, 0x1399, 0x6726, 0x76af, 0x4434, 0x55bd,
+    0xad4a, 0xbcc3, 0x8e58, 0x9fd1, 0xeb6e, 0xfae7, 0xc87c, 0xd9f5,
+    0x3183, 0x200a, 0x1291, 0x0318, 0x77a7, 0x662e, 0x54b5, 0x453c,
+    0xbdcb, 0xac42, 0x9ed9, 0x8f50, 0xfbef, 0xea66, 0xd8fd, 0xc974,
+    0x4204, 0x538d, 0x6116, 0x709f, 0x0420, 0x15a9, 0x2732, 0x36bb,
+    0xce4c, 0xdfc5, 0xed5e, 0xfcd7, 0x8868, 0x99e1, 0xab7a, 0xbaf3,
+    0x5285, 0x430c, 0x7197, 0x601e, 0x14a1, 0x0528, 0x37b3, 0x263a,
+    0xdecd, 0xcf44, 0xfddf, 0xec56, 0x98e9, 0x8960, 0xbbfb, 0xaa72,
+    0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9,
+    0xef4e, 0xfec7, 0xcc5c, 0xddd5, 0xa96a, 0xb8e3, 0x8a78, 0x9bf1,
+    0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
+    0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70,
+    0x8408, 0x9581, 0xa71a, 0xb693, 0xc22c, 0xd3a5, 0xe13e, 0xf0b7,
+    0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cff,
+    0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036,
+    0x18c1, 0x0948, 0x3bd3, 0x2a5a, 0x5ee5, 0x4f6c, 0x7df7, 0x6c7e,
+    0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
+    0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd,
+    0xb58b, 0xa402, 0x9699, 0x8710, 0xf3af, 0xe226, 0xd0bd, 0xc134,
+    0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
+    0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3,
+    0x4a44, 0x5bcd, 0x6956, 0x78df, 0x0c60, 0x1de9, 0x2f72, 0x3efb,
+    0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
+    0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a,
+    0xe70e, 0xf687, 0xc41c, 0xd595, 0xa12a, 0xb0a3, 0x8238, 0x93b1,
+    0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
+    0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
+    0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78
+];
 
-        connection.on('error', (err) => {
-            console.error('RabbitMQ connection error', err);
-            channel = null;
-            setTimeout(connectRabbitMQ, 5000); // Retry connection
-        });
-
-        connection.on('close', () => {
-            console.log('RabbitMQ connection closed');
-            channel = null;
-            setTimeout(connectRabbitMQ, 5000); // Retry connection
-        });
-
-        channel = await connection.createChannel();
-        console.log('Channel created');
-        await channel.assertQueue(queue);
-        console.log('Queue asserted');
-    } catch (error) {
-        console.error('Failed to connect to RabbitMQ', error);
-        setTimeout(connectRabbitMQ, 5000); // Retry after 5 seconds
-    }
-}
-
-// Send data to RabbitMQ and MySQL
-async function sendToRabbitMQ(data) {
-    if (channel) {
-        try {
-            await channel.sendToQueue(queue, Buffer.from(data));
-            console.log(`Message sent to ${queue}: ${data}`);
-        } catch (error) {
-            console.error('Failed to send message to RabbitMQ', error);
-        }
-    } else {
-        console.error('RabbitMQ channel is not available');
-    }
-
-    // Save to MySQL
-    if (db) {
-        try {
-            const parsedData = JSON.parse(data);
-            const { date, gpsInfoLength, satellites, lat, lng, speed, status, deviceId } = parsedData;
-            const query = 'INSERT INTO location_data (date, gps_info_length, satellites, latitude, longitude, speed, status, imei) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
-            const values = [date, gpsInfoLength, satellites, lat, lng, speed, JSON.stringify(status), deviceId];
-            await db.execute(query, values);
-            console.log('Data saved to MySQL');
-        } catch (error) {
-            console.error('Failed to save data to MySQL', error);
-        }
-    }
-}
-
-// Calculate CRC for response packet
-function calculateCRC(data) {
+// Function to calculate CRC16 for length and serial number
+function calculateCRC16(data) {
     let crc = 0xFFFF;
-    for (let byte of data) {
-        crc ^= byte << 8;
-        for (let i = 0; i < 8; i++) {
-            if (crc & 0x8000) {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-        }
+    for (let i = 0; i < data.length; i++) {
+        crc = (crc >> 8) ^ crctab16[(crc ^ data[i]) & 0xFF];
     }
-    return crc & 0xFFFF;
+    return (~crc) & 0xFFFF;
 }
 
-// Parse GT06 login packet
-function parseLoginPacket(data) {
-    return data.slice(4, 12).toString('hex'); // Example: Extracting device ID from login packet
+// Function to parse login message
+function parseLoginMessage(data) {
+    const imei = data.slice(4, 12).toString('hex');
+    return { imei };
 }
 
-// Parse GT06 location packet
-function parseLocationPacket(data, deviceId) {
+// Function to parse location message with protocol 12
+function parseLocationMessage(data,deviceId) {
     const date = new Date(
-        2000 + data[4],
-        data[5] - 1,
-        data[6],
-        data[7],
-        data[8],
-        data[9]
+        2000 + data[4],  // Year
+        data[5] - 1,     // Month (0-11)
+        data[6],         // Day
+        data[7],         // Hour
+        data[8],         // Minute
+        data[9]          // Second
     );
 
-    const gpsInfoLengthAndSatellites = data[10];
-    const gpsInfoLength = gpsInfoLengthAndSatellites >> 4; // First 4 bits
-    const satellites = gpsInfoLengthAndSatellites & 0x0F; // Last 4 bits
+    const gpsInfoLength = data[10] >> 4;
+    const satellites = data[10] & 0x0F;
 
-    const latValue = (data.readUInt32BE(11) / 30000.0) / 60.0;
-    const lngValue = (data.readUInt32BE(15) / 30000.0) / 60.0;
-
-    const lat = latValue.toFixed(6);
-    const lng = lngValue.toFixed(6);
+    const latitudeRaw = data.readUInt32BE(11);
+    const longitudeRaw = data.readUInt32BE(15);
+    const lat = (latitudeRaw / 30000.0) / 60.0;
+    const lng = (longitudeRaw / 30000.0) / 60.0;
 
     const speed = data[21];
     const courseStatus = (data[22] << 8) | data[23];
 
     const status = {
-        realTimeGPS: (courseStatus & 0x2000) !== 0, // Example: bit 13 of courseStatus
-        gpsLocated: (courseStatus & 0x1000) !== 0, // Example: bit 12 of courseStatus
-        longitude: (courseStatus & 0x0800) !== 0 ? 'W' : 'E', // Example: bit 11 of courseStatus
-        latitude: (courseStatus & 0x0400) !== 0 ? 'S' : 'N', // Example: bit 10 of courseStatus
+        realTimeGPS: (courseStatus & 0x2000) !== 0, // bit 13 of courseStatus
+        gpsLocated: (courseStatus & 0x1000) !== 0, // bit 12 of courseStatus
+        longitude: (courseStatus & 0x0800) !== 0 ? 'W' : 'E', // bit 11 of courseStatus
+        latitude: (courseStatus & 0x0400) !== 0 ? 'S' : 'N', // bit 10 of courseStatus
         course: courseStatus & 0x03FF // lower 10 bits for course
     };
 
     return { date, gpsInfoLength, satellites, lat, lng, speed, status, deviceId };
 }
 
-// Check if the packet is a location packet
-function isLocationPacket(data) {
-    return data.length >= 26 && data[0] === 0x78 && data[1] === 0x78 && data[3] === 0x22;
+// Function to save location data to MySQL
+async function saveLocationToDB(location) {
+    if (db) {
+        try {
+            const query = 'INSERT INTO location_data (date, gps_info_length, satellites, latitude, longitude, speed, status, imei) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+            const values = [location.date, location.gpsInfoLength, location.satellites, location.lat, location.lng, location.speed, JSON.stringify(location.status), location.deviceId];
+            await db.execute(query, values);
+            console.log('Location data saved to MySQL');
+        } catch (error) {
+            console.error('Failed to save location data to MySQL', error);
+        }
+    } else {
+        console.error('MySQL connection is not available');
+    }
 }
 
-// Check if the packet is a status packet
-function isStatusPacket(data) {
-    return data.length >= 24 && data[0] === 0x78 && data[1] === 0x78 && data[3] === 0x13;
+// Function to handle login message and respond
+function handleLogin(socket, data) {
+    const parsedData = parseLoginMessage(data);
+                deviceIdMap.set(socket, parsedData.imei);
+    console.log(`Device logged in with IMEI: ${parsedData.imei}`);
+
+    // Create the response without the CRC and stop bits
+    const responseWithoutCRC = Buffer.from([
+        0x78, 0x78, // Start bit
+        0x05,       // Length
+        0x01,       // Protocol number (Login response)
+        data[12], data[13] // Serial number from the login message
+    ]);
+
+    // Calculate CRC16 for the response, which includes only length and serial number
+    const crcData = responseWithoutCRC.slice(2, 6);
+    const crc = calculateCRC16(crcData);
+    const crcBuffer = Buffer.from([(crc >> 8) & 0xFF, crc & 0xFF]);
+
+    // Complete response with CRC and stop bits
+    const response = Buffer.concat([responseWithoutCRC, crcBuffer, Buffer.from([0x0D, 0x0A])]);
+
+    console.log(`Sending response: ${response.toString('hex')}`);
+    socket.write(response);
 }
 
-function isLoginPacket(data) {
-    // GT06 login packet starts with 0x78 0x78 and has a specific structure
-    return data.length >= 16 && data[0] === 0x78 && data[1] === 0x78 && data[3] === 0x01;
-}
-function createLoginResponse(data) {
-    const response = Buffer.alloc(10);
-    response[0] = 0x78;
-    response[1] = 0x78;
-    response[2] = 0x05;
-    response[3] = 0x01;
-    response[4] = data[10]; // Copy the serial number
-    response[5] = data[11];
+// Function to handle location message and respond
+function handleLocation(socket, data) {
+const deviceId = deviceIdMap.get(socket);
+    const parsedData = parseLocationMessage(data,deviceId);
+    console.log(`Location Data: ${JSON.stringify(parsedData)}`);
+    // Save location data to MySQL
+    saveLocationToDB(parsedData);
 
-    const crc = calculateCRC(response.slice(0, 6));
-    response[6] = (crc >> 8) & 0xFF; // CRC high byte
-    response[7] = crc & 0xFF; // CRC low byte
+    // Create the response without the CRC and stop bits
+    const responseWithoutCRC = Buffer.from([
+        0x78, 0x78, // Start bit
+        0x05,       // Length
+        0x12,       // Protocol number (Location response)
+        data[10], data[11] // Serial number from the location message
+    ]);
 
-    response[8] = 0x0D;
-    response[9] = 0x0A;
-    return response;
+    // Calculate CRC16 for the response, which includes only length and serial number
+    const crcData = responseWithoutCRC.slice(2, 6);
+    const crc = calculateCRC16(crcData);
+    const crcBuffer = Buffer.from([(crc >> 8) & 0xFF, crc & 0xFF]);
+
+    // Complete response with CRC and stop bits
+    const response = Buffer.concat([responseWithoutCRC, crcBuffer, Buffer.from([0x0D, 0x0A])]);
+
+    console.log(`Sending response: ${response.toString('hex')}`);
+    socket.write(response);
 }
 
 // Create TCP server
@@ -181,54 +186,30 @@ const server = net.createServer((socket) => {
 
     // Log data received from the client
     socket.on('data', (data) => {
-        if (isLoginPacket(data)) {
-            const deviceId = parseLoginPacket(data);
-            deviceIdMap.set(socket, deviceId);
-            const response = createLoginResponse(data);
-            socket.write(response);
-            console.log(`Received: ${data.toString('hex')}`);
-            console.log('Login packet received, response sent');
-            console.log(`Device ID: ${deviceId}`);
-        } else if (isLocationPacket(data)) {
-            const deviceId = deviceIdMap.get(socket);
-            const location = parseLocationPacket(data, deviceId);
-            console.log(`Device ID: ${location.deviceId}`);
-            console.log(`Date: ${location.date}`);
-            console.log(`GPS Info Length: ${location.gpsInfoLength}`);
-            console.log(`Satellites: ${location.satellites}`);
-            console.log(`Latitude: ${location.lat}`);
-            console.log(`Longitude: ${location.lng}`);
-            console.log(`Speed: ${location.speed}`);
-            console.log(`Status: ${JSON.stringify(location.status)}`);
-            sendToRabbitMQ(JSON.stringify(location));
-            console.log(`Received: ${data.toString('hex')}`);
-            console.log(`Location packet received: ${JSON.stringify(location)}`);
-        } else if (isStatusPacket(data)) {
-            const status = parseStatus(data.slice(24, 28));
-            console.log(`Status: ${JSON.stringify(status)}`);
-            sendToRabbitMQ(JSON.stringify(status));
-            console.log(`Status packet received: ${JSON.stringify(status)}`);
+        console.log(`Received: ${data.toString('hex')}`);
+
+        if (data[3] === 0x01) {
+            handleLogin(socket, data);
+        } else if (data[3] === 0xa0) {
+            handleLocation(socket, data);
         } else {
-            console.log(`Received: ${data.toString('hex')}`);
+            console.log(`Received non-login/non-location message: ${data.toString('hex')}`);
         }
     });
 
     // Handle client disconnect
     socket.on('end', () => {
         console.log('Client disconnected');
-        deviceIdMap.delete(socket); // Remove device ID when client disconnects
     });
 
     // Handle errors
     socket.on('error', (err) => {
         console.error(`Socket error: ${err.message}`);
-        deviceIdMap.delete(socket); // Remove device ID on error
     });
 });
 
-// Start the server
+// Start the server and connect to MySQL
 server.listen(port, () => {
     console.log(`Server is listening on port ${port}`);
-    connectRabbitMQ(); // Connect to RabbitMQ when the server starts
     connectMySQL(); // Connect to MySQL when the server starts
 });
